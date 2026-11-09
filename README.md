@@ -19,9 +19,14 @@ curl.exe -i http://127.0.0.1:8095/readyz
 
 Переменные окружения: `HTTP_ADDR` (по умолчанию `127.0.0.1:8095`), `DATABASE_URL` (обязательна), `SHUTDOWN_TIMEOUT` (по умолчанию `10s`), `JOBS` (какие работы запускать, по умолчанию все).
 
-Демо-пользователи, которых создаёт миграция:
-- Petya — `11111111-1111-1111-1111-111111111111`
-- Masha — `22222222-2222-2222-2222-222222222222`
+Демо-данные, которые создаёт миграция `00002_seed.sql`:
+
+| Кто | user id | счёт EUR |
+|---|---|---|
+| Petya | `11111111-1111-1111-1111-111111111111` | `a0000000-0000-0000-0000-000000000001` |
+| Masha | `22222222-2222-2222-2222-222222222222` | `a0000000-0000-0000-0000-000000000002` |
+| `frozen` | — | `f0000000-0000-0000-0000-000000000001` |
+| `outside` | — | `f0000000-0000-0000-0000-000000000002` |
 
 ## Устройство
 
@@ -214,8 +219,8 @@ REST — `net/http` и `ServeMux` с методами в шаблонах, бе�
 | Таблица | Поля | Ограничения |
 |---|---|---|
 | `users` | `id uuid`, `first_name`, `last_name`, `created_at` | |
-| `accounts` | `id uuid`, `user_id` (пусто у служебных), `type` (`user`/`system`), `code` (`frozen`/`outside` у служебных), `currency`, `balance` (`NULL` у служебных), `created_at` | `CHECK ((type='user' AND user_id IS NOT NULL AND balance IS NOT NULL AND balance >= 0) OR (type='system' AND user_id IS NULL AND balance IS NULL))`, `UNIQUE (code, currency)` |
-| `operations` | `id bigserial`, `type` (`deposit`, `transfer`, `payout_hold`, `payout_settle`, `payout_release`), `payment_id` (пусто у переводов), `created_at` | не меняется |
+| `accounts` | `id uuid`, `user_id` (пусто у служебных), `type` (`user`/`system`), `code` (`frozen`/`outside` у служебных), `currency`, `balance` (`NULL` у служебных), `created_at` | `accounts_kind_check`: у счёта человека есть владелец и баланс, у служебного — код и нет баланса; `accounts_balance_non_negative`: `balance >= 0`; `UNIQUE (code, currency)` — один служебный счёт вида на валюту; `accounts_user_currency_unique`: `UNIQUE (user_id, currency)` — у человека один счёт на валюту, этот же индекс ищет счета по `user_id` |
+| `operations` | `id bigserial`, `type` (`deposit`, `transfer`, `payout_hold`, `payout_settle`, `payout_release`), `payment_id` (появится в срезе 3 вместе с `payments`; пусто у переводов), `created_at` | не меняется |
 | `postings` | `id bigserial`, `operation_id`, `account_id`, `amount` (минус — списание), `created_at` | `CHECK (amount <> 0)`, индекс `(account_id, id)` |
 | `idempotency_keys` | `user_id`, `key`, `request_hash bytea`, `response_code int`, `response_body jsonb`, `created_at` | PK `(user_id, key)`, индекс по `created_at` |
 | `payments` (срез 3) | `id uuid` (он же ключ к провайдеру), `account_id`, `provider_id`, `amount`, `currency`, `destination`, `status`, `provider_ref`, `attempts`, `next_attempt_at`, `created_at`, `updated_at` | `CHECK (amount > 0)`, индекс `(status, next_attempt_at)` |
@@ -247,7 +252,7 @@ REST — `net/http` и `ServeMux` с методами в шаблонах, бе�
   Проверка: `docker compose up -d --build --wait`, затем `/readyz` → 200.
   Коммит: `Service skeleton: config, HTTP server, Postgres, graceful shutdown`.
 - [ ] **2. Таблицы и демо-данные.**
-  - `00001_ledger.sql`: `users`, `accounts`, `operations`, `postings`, `idempotency_keys` со всеми `CHECK` и индексами.
+  - `00001_tables.sql`: `users`, `accounts`, `operations`, `postings`, `idempotency_keys` со всеми `CHECK` и индексами.
   - `00002_seed.sql`: Petya и Masha с EUR-счетами, `frozen` и `outside` в EUR.
 
   Проверка: `docker compose exec postgres psql -U app -d ledger -c "\dt"` → 5 таблиц; `accounts` → 4 строки.
