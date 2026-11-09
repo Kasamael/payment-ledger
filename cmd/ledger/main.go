@@ -43,8 +43,12 @@ func run(ctx context.Context, logger *slog.Logger) error {
 		return err
 	}
 
+	accountRepository := postgres.NewAccountRepository(pool)
+	accountHandler := httpapi.NewAccountHandler(accountRepository, logger)
+	srv := httpapi.NewServer(accountHandler)
+
 	server := &http.Server{
-		Handler:           httpapi.Routes(pool),
+		Handler:           srv.Routes(pool),
 		ReadHeaderTimeout: 5 * time.Second,
 		ReadTimeout:       10 * time.Second,
 		WriteTimeout:      15 * time.Second,
