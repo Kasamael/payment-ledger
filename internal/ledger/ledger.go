@@ -23,3 +23,10 @@ type Posting struct {
 	Amount      int64     `json:"amount" db:"amount"`
 	CreatedAt   time.Time `json:"created_at" db:"created_at"`
 }
+
+type Deposit struct {
+	OperationID int64  `json:"operation_id"`
+	AccountID   string `json:"account_id"`
+	Amount      int64  `json:"amount"`
+	Balance     int64  `json:"balance"`
+}

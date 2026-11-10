@@ -32,5 +32,6 @@ func (s *Server) Routes(pool *pgxpool.Pool) http.Handler {
 	mux.HandleFunc("GET /accounts", s.as.GetAccounts)
 	mux.HandleFunc("GET /accounts/{id}", s.as.GetAccount)
 	mux.HandleFunc("GET /accounts/{id}/postings", s.as.GetAccountPostings)
+	mux.HandleFunc("POST /accounts/{id}/deposits", s.as.Deposit)
 	return mux
 }

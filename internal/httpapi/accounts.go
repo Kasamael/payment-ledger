@@ -62,7 +62,6 @@ func (h *AccountHandler) GetAccountPostings(w http.ResponseWriter, r *http.Reque
 		return
 	}
 
-	// Someone else's or a missing account gives 404, not an empty statement.
 	if _, err := h.accountRepository.Get(r.Context(), userID, id); err != nil {
 		h.writeError(w, r, err)
 		return
@@ -74,6 +73,41 @@ func (h *AccountHandler) GetAccountPostings(w http.ResponseWriter, r *http.Reque
 		return
 	}
 	writeResponse(w, http.StatusOK, map[string]any{"postings": postings})
+}
+
+func (h *AccountHandler) Deposit(w http.ResponseWriter, r *http.Request) {
+	userID, ok := userIDFromHeader(w, r)
+	if !ok {
+		return
+	}
+
+	accountID, ok := pathUUID(w, r, "id")
+	if !ok {
+		return
+	}
+
+	var body struct {
+		Amount int64 `json:"amount"`
+	}
+	decoder := json.NewDecoder(r.Body)
+	decoder.DisallowUnknownFields()
+
+	if err := decoder.Decode(&body); err != nil {
+		writeResponse(w, http.StatusBadRequest, errorBody("invalid JSON body"))
+		return
+	}
+
+	if body.Amount <= 0 {
+		writeResponse(w, http.StatusBadRequest, errorBody("amount must be positive"))
+		return
+	}
+
+	dep, err := h.accountRepository.Deposit(r.Context(), userID, accountID, body.Amount)
+	if err != nil {
+		h.writeError(w, r, err)
+		return
+	}
+	writeResponse(w, http.StatusCreated, dep)
 }
 
 func (h *AccountHandler) writeError(w http.ResponseWriter, r *http.Request, err error) {
