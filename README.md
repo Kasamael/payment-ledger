@@ -184,10 +184,11 @@ REST — `net/http` и `ServeMux` с методами в шаблонах, бе�
 | Ошибка ядра | REST | gRPC |
 |---|---|---|
 | не найдено | 404 | `NotFound` |
+| чужой счёт | 404, чтобы не выдавать, что счёт существует | `NotFound` |
 | не хватает денег | 422 | `FailedPrecondition` |
+| разные валюты | 422 | `FailedPrecondition` |
 | метка от другого запроса | 422 | `InvalidArgument` |
 | неверные данные | 400 | `InvalidArgument` |
-| чужой счёт | 403 | `PermissionDenied` |
 | остальное | 500 | `Internal` |
 
 Пользователь задаётся заголовком `X-User-ID`, сервер ему верит. Это допущение для демо: аутентификации нет.
@@ -248,19 +249,19 @@ REST — `net/http` и `ServeMux` с методами в шаблонах, бе�
 
 ### Срез 1
 
-- [ ] **1. Каркас.** config, `Connect` и `Migrate`, `/healthz` и `/readyz`, graceful shutdown, Dockerfile, compose, `.gitignore`.
+- [x] **1. Каркас.** config, `Connect` и `Migrate`, `/healthz` и `/readyz`, graceful shutdown, Dockerfile, compose, `.gitignore`.
   Проверка: `docker compose up -d --build --wait`, затем `/readyz` → 200.
   Коммит: `Service skeleton: config, HTTP server, Postgres, graceful shutdown`.
-- [ ] **2. Таблицы и демо-данные.**
+- [x] **2. Таблицы и демо-данные.**
   - `00001_tables.sql`: `users`, `accounts`, `operations`, `postings`, `idempotency_keys` со всеми `CHECK` и индексами.
   - `00002_seed.sql`: Petya и Masha с EUR-счетами, `frozen` и `outside` в EUR.
 
   Проверка: `docker compose exec postgres psql -U app -d ledger -c "\dt"` → 5 таблиц; `accounts` → 4 строки.
   Коммит: `Ledger schema and demo seed`.
-- [ ] **3. Чтение.** `GET /accounts`, `/accounts/{id}`, `/accounts/{id}/postings`. Суммы — целые центы.
+- [x] **3. Чтение.** `GET /accounts`, `/accounts/{id}`, `/accounts/{id}/postings`. Суммы — целые центы.
   Проверка: `curl.exe -H "X-User-ID: 11111111-1111-1111-1111-111111111111" http://127.0.0.1:8095/accounts` → счёт Пети, `balance: 0`.
   Коммит: `Read accounts and statement`.
-- [ ] **4. Пополнение.**
+- [x] **4. Пополнение.**
   - Функция `inTx`.
   - `POST /accounts/{id}/deposits` `{"amount": 10000}`: счёт должен принадлежать `X-User-ID`; движения `outside` −, счёт +; кеш под `FOR UPDATE`.
 
@@ -268,7 +269,7 @@ REST — `net/http` и `ServeMux` с методами в шаблонах, бе�
   Коммит: `Deposits through a shared transaction helper`.
 - [ ] **5. Перевод.**
   - `POST /transfers` `{"from_account_id", "to_account_id", "amount"}`.
-  - Отказы: чужой счёт → 403; тот же счёт или сумма ≤ 0 → 400; разные валюты или не хватает денег → 422.
+  - Отказы: чужой счёт отправителя или нет получателя → 404; тот же счёт или сумма ≤ 0 → 400; разные валюты или не хватает денег → 422.
   - Блокировки в порядке id.
 
   Проверка — интеграционный тест: баланс 10000, два перевода по 8000 одновременно → один 201, один 422, остаток 2000.

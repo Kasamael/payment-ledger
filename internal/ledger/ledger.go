@@ -6,7 +6,9 @@ import (
 )
 
 var (
-	ErrNotFound = errors.New("not found")
+	ErrNotFound          = errors.New("not found")
+	ErrInsufficientFunds = errors.New("insufficient funds")
+	ErrCurrencyMismatch  = errors.New("currency mismatch")
 )
 
 type Account struct {
@@ -29,4 +31,12 @@ type Deposit struct {
 	AccountID   string `json:"account_id"`
 	Amount      int64  `json:"amount"`
 	Balance     int64  `json:"balance"`
+}
+
+type Transfer struct {
+	OperationID   int64  `json:"operation_id"`
+	FromAccountID string `json:"from_account_id"`
+	ToAccountID   string `json:"to_account_id"`
+	Amount        int64  `json:"amount"`
+	Balance       int64  `json:"balance"`
 }

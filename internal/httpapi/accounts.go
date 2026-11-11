@@ -110,13 +110,63 @@ func (h *AccountHandler) Deposit(w http.ResponseWriter, r *http.Request) {
 	writeResponse(w, http.StatusCreated, dep)
 }
 
-func (h *AccountHandler) writeError(w http.ResponseWriter, r *http.Request, err error) {
-	if errors.Is(err, ledger.ErrNotFound) {
-		writeResponse(w, http.StatusNotFound, errorBody("account not found"))
+func (h *AccountHandler) Transfer(w http.ResponseWriter, r *http.Request) {
+	userID, ok := userIDFromHeader(w, r)
+	if !ok {
 		return
 	}
-	h.logger.Error("request failed", "method", r.Method, "path", r.URL.Path, "err", err)
-	writeResponse(w, http.StatusInternalServerError, errorBody("internal error"))
+
+	var body struct {
+		OperationID   int64  `json:"operation_id"`
+		FromAccountID string `json:"from_account_id"`
+		ToAccountID   string `json:"to_account_id"`
+		Amount        int64  `json:"amount"`
+	}
+
+	decoder := json.NewDecoder(r.Body)
+	decoder.DisallowUnknownFields()
+	if err := decoder.Decode(&body); err != nil {
+		writeResponse(w, http.StatusBadRequest, errorBody("invalid JSON body"))
+		return
+	}
+
+	fromID, errFrom := uuid.Parse(body.FromAccountID)
+	toID, errTo := uuid.Parse(body.ToAccountID)
+	if errFrom != nil || errTo != nil {
+		writeResponse(w, http.StatusBadRequest, errorBody("account ids must be a valid UUIDs"))
+		return
+	}
+
+	if fromID == toID {
+		writeResponse(w, http.StatusBadRequest, errorBody("cannot transfer to same account"))
+		return
+	}
+
+	if body.Amount <= 0 {
+		writeResponse(w, http.StatusBadRequest, errorBody("amount must be positive"))
+		return
+	}
+
+	transfer, err := h.accountRepository.Transfer(r.Context(), userID, fromID.String(), toID.String(), body.Amount)
+	if err != nil {
+		h.writeError(w, r, err)
+		return
+	}
+	writeResponse(w, http.StatusCreated, transfer)
+}
+
+func (h *AccountHandler) writeError(w http.ResponseWriter, r *http.Request, err error) {
+	switch {
+	case errors.Is(err, ledger.ErrNotFound):
+		writeResponse(w, http.StatusNotFound, errorBody("account not found"))
+	case errors.Is(err, ledger.ErrCurrencyMismatch):
+		writeResponse(w, http.StatusUnprocessableEntity, errorBody("currency mismatch"))
+	case errors.Is(err, ledger.ErrInsufficientFunds):
+		writeResponse(w, http.StatusUnprocessableEntity, errorBody("insufficient funds"))
+	default:
+		h.logger.Error("request failed", "method", r.Method, "path", r.URL.Path, "err", err)
+		writeResponse(w, http.StatusInternalServerError, errorBody("internal error"))
+	}
 }
 
 func userIDFromHeader(w http.ResponseWriter, r *http.Request) (string, bool) {
