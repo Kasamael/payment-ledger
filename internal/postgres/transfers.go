@@ -38,7 +38,7 @@ func (r *AccountRepository) Transfer(ctx context.Context, userID, fromID, toID s
 		}
 
 		if from.userID != userID {
-			return fmt.Errorf("account %s: %w", fromID, err)
+			return fmt.Errorf("account %s: %w", fromID, ledger.ErrNotFound)
 		}
 		if from.currency != to.currency {
 			return ledger.ErrCurrencyMismatch
@@ -84,7 +84,7 @@ func lockAccount(ctx context.Context, tx pgx.Tx, accountID string) (lockedAccoun
 		return lockedAccount{}, fmt.Errorf("account %s: %w", accountID, ledger.ErrNotFound)
 	}
 	if err != nil {
-		return lockedAccount{}, fmt.Errorf("lock account %s: %w", accountID, ledger.ErrNotFound)
+		return lockedAccount{}, fmt.Errorf("lock account %s: %w", accountID, err)
 	}
 	return a, nil
 }
