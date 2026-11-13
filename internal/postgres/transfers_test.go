@@ -87,6 +87,7 @@ func deleteTestUser(t *testing.T, pool *pgxpool.Pool, userID, accountID string) 
 		{`DELETE FROM postings WHERE operation_id = ANY($1)`, opIDs},
 		{`DELETE FROM operations WHERE id = ANY($1)`, opIDs},
 		{`DELETE FROM accounts WHERE id = $1`, accountID},
+		{`DELETE FROM idempotency_keys WHERE user_id = $1`, userID},
 		{`DELETE FROM users WHERE id = $1`, userID},
 	}
 	for _, s := range steps {

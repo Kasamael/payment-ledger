@@ -1,14 +1,14 @@
 package httpapi
 
 import (
+	"bytes"
 	"encoding/json"
-	"errors"
 	"log/slog"
 	"net/http"
-	"payment_ledger/internal/ledger"
 	"payment_ledger/internal/postgres"
 
 	"github.com/google/uuid"
+	"github.com/jackc/pgx/v5"
 )
 
 type AccountHandler struct {
@@ -86,10 +86,15 @@ func (h *AccountHandler) Deposit(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	key, raw, hash, ok := readIdempotency(w, r)
+	if !ok {
+		return
+	}
+
 	var body struct {
 		Amount int64 `json:"amount"`
 	}
-	decoder := json.NewDecoder(r.Body)
+	decoder := json.NewDecoder(bytes.NewReader(raw))
 	decoder.DisallowUnknownFields()
 
 	if err := decoder.Decode(&body); err != nil {
@@ -102,16 +107,25 @@ func (h *AccountHandler) Deposit(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	dep, err := h.accountRepository.Deposit(r.Context(), userID, accountID, body.Amount)
+	resp, err := h.accountRepository.Idempotent(r.Context(), userID, key, hash, func(tx pgx.Tx) (postgres.Response, error) {
+		dep, err := h.accountRepository.DepositTx(r.Context(), tx, userID, accountID, body.Amount)
+		return businessResponse(http.StatusCreated, dep, err)
+	})
 	if err != nil {
 		h.writeError(w, r, err)
 		return
 	}
-	writeResponse(w, http.StatusCreated, dep)
+
+	writeSaved(w, resp)
 }
 
 func (h *AccountHandler) Transfer(w http.ResponseWriter, r *http.Request) {
 	userID, ok := userIDFromHeader(w, r)
+	if !ok {
+		return
+	}
+
+	key, raw, hash, ok := readIdempotency(w, r)
 	if !ok {
 		return
 	}
@@ -123,7 +137,7 @@ func (h *AccountHandler) Transfer(w http.ResponseWriter, r *http.Request) {
 		Amount        int64  `json:"amount"`
 	}
 
-	decoder := json.NewDecoder(r.Body)
+	decoder := json.NewDecoder(bytes.NewReader(raw))
 	decoder.DisallowUnknownFields()
 	if err := decoder.Decode(&body); err != nil {
 		writeResponse(w, http.StatusBadRequest, errorBody("invalid JSON body"))
@@ -147,26 +161,24 @@ func (h *AccountHandler) Transfer(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	transfer, err := h.accountRepository.Transfer(r.Context(), userID, fromID.String(), toID.String(), body.Amount)
+	resp, err := h.accountRepository.Idempotent(r.Context(), userID, key, hash, func(tx pgx.Tx) (postgres.Response, error) {
+		tr, err := h.accountRepository.TransferTx(r.Context(), tx, userID, fromID.String(), toID.String(), body.Amount)
+		return businessResponse(http.StatusCreated, tr, err)
+	})
 	if err != nil {
 		h.writeError(w, r, err)
 		return
 	}
-	writeResponse(w, http.StatusCreated, transfer)
+	writeSaved(w, resp)
 }
 
 func (h *AccountHandler) writeError(w http.ResponseWriter, r *http.Request, err error) {
-	switch {
-	case errors.Is(err, ledger.ErrNotFound):
-		writeResponse(w, http.StatusNotFound, errorBody("account not found"))
-	case errors.Is(err, ledger.ErrCurrencyMismatch):
-		writeResponse(w, http.StatusUnprocessableEntity, errorBody("currency mismatch"))
-	case errors.Is(err, ledger.ErrInsufficientFunds):
-		writeResponse(w, http.StatusUnprocessableEntity, errorBody("insufficient funds"))
-	default:
-		h.logger.Error("request failed", "method", r.Method, "path", r.URL.Path, "err", err)
-		writeResponse(w, http.StatusInternalServerError, errorBody("internal error"))
+	if status, message, ok := businessError(err); ok {
+		writeResponse(w, status, errorBody(message))
+		return
 	}
+	h.logger.Error("request failed", "method", r.Method, "path", r.URL.Path, "err", err)
+	writeResponse(w, http.StatusInternalServerError, errorBody("internal error"))
 }
 
 func userIDFromHeader(w http.ResponseWriter, r *http.Request) (string, bool) {

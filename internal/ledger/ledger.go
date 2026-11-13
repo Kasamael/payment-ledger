@@ -6,9 +6,10 @@ import (
 )
 
 var (
-	ErrNotFound          = errors.New("not found")
-	ErrInsufficientFunds = errors.New("insufficient funds")
-	ErrCurrencyMismatch  = errors.New("currency mismatch")
+	ErrNotFound             = errors.New("not found")
+	ErrInsufficientFunds    = errors.New("insufficient funds")
+	ErrCurrencyMismatch     = errors.New("currency mismatch")
+	ErrIdempotencyKeyReused = errors.New("idempotency key reused with a different request")
 )
 
 type Account struct {
