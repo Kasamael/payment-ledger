@@ -9,11 +9,12 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
-	"payment_ledger/internal/config"
-	"payment_ledger/internal/httpapi"
-	"payment_ledger/internal/postgres"
 	"syscall"
 	"time"
+
+	"github.com/Kasamael/payment-ledger/internal/config"
+	"github.com/Kasamael/payment-ledger/internal/httpapi"
+	"github.com/Kasamael/payment-ledger/internal/postgres"
 )
 
 func main() {

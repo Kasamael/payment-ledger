@@ -4,9 +4,10 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"payment_ledger/internal/ledger"
 
 	"github.com/jackc/pgx/v5"
+
+	"github.com/Kasamael/payment-ledger/internal/ledger"
 )
 
 func (r *AccountRepository) Deposit(ctx context.Context, userID, accountID string, amount int64) (ledger.Deposit, error) {

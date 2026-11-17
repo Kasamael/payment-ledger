@@ -4,11 +4,12 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"payment_ledger/internal/ledger"
 	"time"
 
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
+
+	"github.com/Kasamael/payment-ledger/internal/ledger"
 )
 
 const postingsLimit = 50

@@ -6,8 +6,9 @@ import (
 	"errors"
 	"io"
 	"net/http"
-	"payment_ledger/internal/ledger"
-	"payment_ledger/internal/postgres"
+
+	"github.com/Kasamael/payment-ledger/internal/ledger"
+	"github.com/Kasamael/payment-ledger/internal/postgres"
 )
 
 const (

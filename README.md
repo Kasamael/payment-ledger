@@ -1,299 +1,227 @@
 # payment-ledger
 
-Учебный платёжный сервис на Go: счета, переводы, вывод на карту через ненадёжного провайдера. Деньги поддельные. Цель проекта — показать решения типичных проблем платёжки (гонки, повторы, медленный провайдер, потеря событий) и дать по ним покликать на демо-странице.
+[![CI](https://github.com/Kasamael/payment-ledger/actions/workflows/ci.yml/badge.svg)](https://github.com/Kasamael/payment-ledger/actions/workflows/ci.yml)
 
-Это единственный документ проекта: решения, схема данных и план работ — здесь.
+A small payment service in Go that shows how to keep money correct under concurrency and retries: double-entry
+ledger, ordered row locks, idempotency keys — with a demo page where you can trigger the race yourself.
+The money is fake.
 
-## Запуск
+**Status:** slice 1 of 6 is done — accounts, deposits, transfers, idempotent API, demo page, integration tests.
+Payouts through an unreliable provider, gRPC and Kafka are designed below and marked *planned*.
+
+Live demo: *coming soon* · Stack: Go, `net/http`, `pgx`, PostgreSQL, goose, Docker
+
+## Try it in 60 seconds
 
 ```bash
 docker compose up -d --build --wait
-curl.exe -i http://127.0.0.1:8095/readyz
 ```
 
-| Что | Адрес |
+Open <http://127.0.0.1:8095/>. You are Petya.
+
+1. **Accounts** → *Deposit* 100 €.
+2. **Transfer** → amount 80 € → *Send twice at once*.
+   Two transfers hit the server at the same moment: exactly one gets `201`, the other `422 insufficient funds`.
+   Petya has 20 €, never −60 €.
+3. *Retry same key* → `201` with the **same `operation_id`**. The server replayed the saved response; no second
+   transfer happened.
+4. Switch to **Masha** at the top: 80 € and one `transfer` line in her statement.
+
+The same from the command line:
+
+```bash
+P='X-User-ID: 11111111-1111-1111-1111-111111111111'
+curl -s -X POST -H "$P" -H 'Idempotency-Key: d1' -d '{"amount":10000}' \
+  http://127.0.0.1:8095/accounts/a0000000-0000-0000-0000-000000000001/deposits
+curl -s -X POST -H "$P" -H 'Idempotency-Key: t1' \
+  -d '{"from_account_id":"a0000000-0000-0000-0000-000000000001","to_account_id":"a0000000-0000-0000-0000-000000000002","amount":8000}' \
+  http://127.0.0.1:8095/transfers
+```
+
+Run the second command again: same answer, same `operation_id`, balance unchanged.
+
+## Architecture
+
+```mermaid
+flowchart LR
+    client[Browser / client] -->|REST| api[API<br/>net/http]
+    api --> db[(PostgreSQL)]
+    grpc[gRPC GetBalance]:::planned --> db
+    sender[Payment sender]:::planned --> db
+    sender -->|HTTP| sim[Provider simulator]:::planned
+    sim -->|webhook| api
+    recon[Reconciler]:::planned --> db
+    recon --> sim
+    relay[Outbox relay]:::planned --> db
+    relay --> kafka[(Kafka)]:::planned
+    reader[Event reader]:::planned --> kafka
+    classDef planned stroke-dasharray: 5 5,color:#888
+```
+
+Solid boxes exist today, dashed ones are planned. One binary (`cmd/ledger`) will run all jobs as goroutines in an
+`errgroup` with a shared `context`: one job fails or SIGTERM arrives — all stop. Jobs talk only through the database.
+The provider simulator is a separate binary, so timeouts and dropped connections go through a real network.
+
+## Design decisions
+
+| # | Problem | Decision | Why not otherwise | |
+|---|---|---|---|---|
+| 1 | A bare balance number can't explain where money came from | Double entry: an immutable **operation** with **postings** that sum to zero; `accounts.balance` is a cache updated in the same transaction | One "from → to" row breaks on a three-party fee; `float` loses cents; summing postings on every transfer is slow | built |
+| 2 | 100 € on the account, two 80 € transfers in the same second | One transaction: `SELECT … FOR UPDATE` on both accounts **in ascending id order**, check the balance in Go, write postings | Optimistic versions loop on a hot account; `SERIALIZABLE` retries everything; `sync.Mutex` breaks with two instances | built |
+| 3 | The connection dropped, the client retries the transfer | `Idempotency-Key`: key, work and saved response in one transaction; refusals are saved too | A key column on `operations` remembers only successes | built |
+| 4 | The provider answers in seconds or never | Payout returns `202 accepted`; a worker calls the provider outside the transaction | Holding a transaction open holds a pool connection and the account lock | planned |
+| 5 | We sent 50 € and got no answer | Statuses `accepted → sent / unknown → succeeded / failed / needs_review`; conditional `UPDATE … WHERE status IN (…)`; a reconciler asks the provider with backoff | "Timeout = failure" returns money that may have left; "timeout = resend" may pay twice | planned |
+| 6 | Payment saved, process dies before Kafka | Transactional outbox, one relay under `pg_try_advisory_lock`, partition key = account | Several relays with `SKIP LOCKED` break ordering; Debezium is too heavy for a Raspberry Pi | planned |
+| 7 | Decisions 2, 3, 5 rely on exact SQL and Postgres error codes | `pgx` directly, hand-written SQL, one `inTx` helper: `lock_timeout`, rollback, retry on `40P01`/`40001` | An ORM hides the SQL these decisions depend on; `sqlc` later, past ~30 queries | built |
+| 8 | A slow provider must not slow down transfers | Workers pull from the DB (`FOR UPDATE SKIP LOCKED`), own `http.Client` with timeouts, retries only for status queries, own circuit breaker | A goroutine per payment is unbounded and dies with the process | planned |
+| 9 | Browsers, the provider and internal services need different transports | REST outside, gRPC inside, one core; errors mapped in one place | Only gRPC needs grpc-web for the browser; only REST loses the internal contract | REST built, gRPC planned |
+| 10 | Reviewers skim READMEs | Demo page built into the binary with `embed`, one screen per problem | A React app adds npm and a build step for one page | built |
+
+### 1. Double entry
+
+Money never appears or disappears; it moves. Every change is an operation plus postings that sum to zero:
+
+| Operation | Postings |
 |---|---|
-| REST и страница | `127.0.0.1:8095` → контейнер `:8080` (8080 на машине занят FinAudit) |
-| gRPC (срез 2) | контейнер `:9090`, только внутренняя сеть |
-| Postgres | `postgres://app:app@postgres:5432/ledger` внутри compose |
+| deposit 100 € | `outside` −100, Petya +100 |
+| transfer 30 € | Petya −30, Masha +30 |
+| payout hold / success / failure *(planned)* | Petya −50, `frozen` +50 / `frozen` −50, `outside` +50 / `frozen` −50, Petya +50 |
 
-Переменные окружения: `HTTP_ADDR` (по умолчанию `127.0.0.1:8095`), `DATABASE_URL` (обязательна), `SHUTDOWN_TIMEOUT` (по умолчанию `10s`), `JOBS` (какие работы запускать, по умолчанию все).
+Operations and postings are never updated or deleted; a mistake is fixed by a reverse operation. Money is `bigint`
+in cents. `frozen` and `outside` are system accounts, one per currency; they have no cached balance and are never
+locked, otherwise every payout would queue behind one row.
 
-Демо-данные, которые создаёт миграция `00002_seed.sql`:
+### 2. Ordered row locks
 
-| Кто | user id | счёт EUR |
+```go
+first, second := fromID, toID
+if second < first {
+	first, second = second, first // always lock the smaller id first
+}
+a1, err := lockAccount(ctx, tx, first)  // SELECT … FOR UPDATE
+a2, err := lockAccount(ctx, tx, second)
+```
+
+Petya→Masha and Masha→Petya at the same moment both start from the smaller id, so the second simply waits — no
+circular wait, no deadlock. `inTx` still retries `40P01`/`40001` as a safety net, and `CHECK (balance >= 0)` is the
+last line of defence.
+
+The tests prove it both ways: with the code as is, 50 + 50 crossing transfers all succeed; with the ordering removed,
+Postgres reports over a hundred deadlocks and the test fails.
+
+### 3. Idempotency keys
+
+```text
+BEGIN
+  INSERT INTO idempotency_keys … ON CONFLICT DO NOTHING
+  0 rows → key known: same request hash → return saved response; other hash → 422
+  1 row  → run the transfer, save status + body next to the key
+COMMIT
+```
+
+- A concurrent duplicate waits on the insert until the first transaction ends, then reads its response. No
+  "in progress" state is needed because an uncommitted row is invisible.
+- A refusal (`422 insufficient funds`) is a saved response and the transaction commits. Otherwise a retry after
+  money arrives would succeed — a different answer to the same request.
+- A technical failure is an error: it rolls back together with the key, so a retry runs again.
+- `23505` is not caught: after any error a Postgres transaction is aborted (`25P02`) and the saved response could not
+  be read in it anyway.
+
+## API
+
+| Request | What it does | |
+|---|---|---|
+| `GET /healthz` | process is alive (does not touch the DB) | built |
+| `GET /readyz` | ready: DB answers, otherwise `503` | built |
+| `GET /accounts` | accounts of the user from `X-User-ID` | built |
+| `GET /accounts/{id}` | one account with balance | built |
+| `GET /accounts/{id}/postings` | statement, newest first, last 50 | built |
+| `POST /accounts/{id}/deposits` | test deposit, `Idempotency-Key` required | built |
+| `POST /transfers` | transfer, `Idempotency-Key` required | built |
+| `GET /` | demo page | built |
+| `POST /payments` | payout to a card, `202` | planned |
+| `GET /payments/{id}` | payout status | planned |
+| `POST /webhooks/provider` | provider notifications, HMAC-signed | planned |
+| `GET /events` | event feed for the demo page | planned |
+
+| Core error | REST | gRPC *(planned)* |
+|---|---|---|
+| not found, or someone else's account (not revealed) | 404 | `NotFound` |
+| insufficient funds, currency mismatch | 422 | `FailedPrecondition` |
+| idempotency key reused with a different request | 422 | `InvalidArgument` |
+| invalid input, missing `Idempotency-Key` | 400 | `InvalidArgument` |
+| anything else (logged, not shown) | 500 | `Internal` |
+
+The user is taken from the `X-User-ID` header and trusted — a demo assumption, see *Not done*.
+
+## Data model
+
+| Table | Key columns | Constraints | |
+|---|---|---|---|
+| `users` | `id`, `first_name`, `last_name` | | built |
+| `accounts` | `id`, `user_id` (null for system), `type` (`user`/`system`), `code` (`frozen`/`outside`), `currency`, `balance` (null for system) | owner+balance for user accounts, code and no balance for system; `balance >= 0`; one user account per currency; one system account of each kind per currency | built |
+| `operations` | `id`, `type` (`deposit`, `transfer`, `payout_*`) | never updated | built |
+| `postings` | `operation_id`, `account_id`, `amount` (negative = debit) | `amount <> 0`; index `(account_id, id)` for statements | built |
+| `idempotency_keys` | PK `(user_id, key)`, `request_hash`, `response_code`, `response_body` | | built |
+| `payments`, `providers`, `webhook_inbox`, `outbox` | | | planned |
+
+Migrations live in `internal/postgres/migrations` and run on start (goose, embedded). `00002_seed.sql` creates the
+demo data:
+
+| Who | user id | EUR account |
 |---|---|---|
 | Petya | `11111111-1111-1111-1111-111111111111` | `a0000000-0000-0000-0000-000000000001` |
 | Masha | `22222222-2222-2222-2222-222222222222` | `a0000000-0000-0000-0000-000000000002` |
 | `frozen` | — | `f0000000-0000-0000-0000-000000000001` |
 | `outside` | — | `f0000000-0000-0000-0000-000000000002` |
 
-## Устройство
+## Running and testing
 
-```text
-cmd/
-  ledger/main.go          наш сервис: все работы в одной программе
-  provider-sim/main.go    поддельный провайдер (срез 3)
-internal/
-  config/                 переменные окружения
-  httpapi/                REST-обработчики
-  postgres/               пул, миграции, SQL
-  postgres/migrations/    goose, вшиты через embed
-  web/                    демо-страница (срез 1, шаг 7)
+| What | Where |
+|---|---|
+| REST and demo page | host `127.0.0.1:8095` → container `:8080` |
+| PostgreSQL | host `127.0.0.1:5433` → container `:5432`, user/password/db `app`/`app`/`ledger` (local only) |
+
+Environment: `DATABASE_URL` (required), `HTTP_ADDR` (default `127.0.0.1:8095`), `SHUTDOWN_TIMEOUT` (default `10s`).
+
+```bash
+go test -race ./...
 ```
 
-**Одна программа, пять работ.** Каждая работа — горутина из `main` с общим `context`, все в `errgroup`: упала одна — останавливаются все, SIGTERM останавливает все. Работы общаются через базу.
+Integration tests run against a real PostgreSQL: by default the one from `docker compose` on port 5433, or set
+`TEST_DATABASE_URL`. If no database is reachable they are **skipped**, not failed. They create their own users with
+random ids and delete everything afterwards, so the demo data is never touched. CI runs them against a PostgreSQL
+service container.
 
-| Работа | Что делает | Срез |
+```text
+cmd/ledger/               the service
+cmd/provider-sim/         fake payment provider (planned, slice 3)
+internal/config/          environment
+internal/httpapi/         REST handlers, idempotency plumbing
+internal/ledger/          domain types and errors
+internal/postgres/        pool, migrations, SQL, transactions; integration tests
+internal/web/             demo page, embedded
+```
+
+## Not done
+
+Honest limits of the current version:
+
+- **No authentication.** `X-User-ID` is trusted. On a public address anyone can act as Petya or Masha with fake money.
+- **"Postings sum to zero" is enforced by code, not by the database.** A deferred constraint trigger would close it.
+- Idempotency keys are not cleaned up yet (planned: delete after 24 hours).
+- The saved response is stored as `jsonb`, so a replay has the same content but may differ in key order and spaces.
+- No reconciliation against a provider's daily report and no UI for `needs_review` (both after slice 4).
+
+## Roadmap
+
+| Slice | What | |
 |---|---|---|
-| API | REST и gRPC | 1, 2 |
-| отправщик платежей | вызывает провайдера | 3 |
-| сверщик | спрашивает статус зависших платежей | 4 |
-| отправщик событий | outbox → Kafka | 5 |
-| читатель событий | Kafka → лента на странице, только для демо | 5 |
+| 1 | Accounts, deposits, transfers with ordered locks, idempotency keys, demo page, integration tests | ✅ |
+| 2 | gRPC `GetBalance`: deadlines, interceptors, health, reflection | |
+| 3 | Provider simulator, payouts, payment statuses | |
+| 4 | Reconciler, HMAC webhooks, circuit breaker | |
+| 5 | Outbox → Kafka, event feed on the demo page | |
+| 6 | Prometheus metrics, Grafana dashboard | |
 
-Симулятор провайдера — отдельная программа, чтобы таймауты и обрывы шли по настоящей сети.
-
-## Решения
-
-Каждое решение: проблема → что делаем → почему не иначе.
-
-### 1. Деньги — операции и движения (двойная запись)
-**Проблема:** если хранить только число «у Пети 100 €», после ошибки не объяснить, откуда сумма, и нечего сверять.
-
-**Решение:**
-- **Операция** — одно событие («Петя перевёл Маше 30 €»). **Движения** — её строки: «Петя −30», «Маша +30».
-- Сумма движений операции равна 0. Это правило держит код, `CHECK` его не выразить.
-- Операции и движения не меняются и не удаляются. Ошибку исправляет обратная операция.
-- Деньги — `bigint` в центах (100 € = 10000), валюта — у счёта.
-- `accounts.balance` — кеш, меняется в той же транзакции, что и движения.
-- Служебные счета без владельца, по одному на валюту: `frozen` (заморожено) и `outside` (внешний мир).
-  - пополнение: `outside` −, счёт +;
-  - вывод, заморозка: счёт −, `frozen` +;
-  - вывод, успех: `frozen` −, `outside` +;
-  - вывод, отказ: `frozen` −, счёт +.
-
-**Не выбрали:**
-- одну строку «откуда → куда» — ломается на комиссии с тремя сторонами;
-- `float` — теряет центы;
-- считать баланс всегда по движениям — дорого на каждом переводе.
-
-### 2. Два перевода одновременно — блокировка строк в порядке id
-**Проблема:** у Пети 100 €, два перевода по 80 за одну секунду. Чтение → проверка → запись пропустит оба.
-
-**Решение:**
-- Одна транзакция: `SELECT … FOR UPDATE` по счетам **в порядке возрастания id**, затем проверка «хватает ли» в Go, затем движения и кеш.
-- Порядок по id исключает взаимную блокировку встречных переводов.
-- Повтор транзакции при `40P01` и `40001`.
-- `CHECK (balance >= 0)` — последняя защита.
-- Служебные счета не блокируются и не хранят баланс (`NULL`), иначе все выводы встанут в очередь за одной строкой.
-
-**Не выбрали:**
-- версии с повтором — на горячем счёте повторы идут по кругу;
-- `SERIALIZABLE` — повторять приходится любую транзакцию;
-- `sync.Mutex` — не работает при двух копиях сервиса.
-
-### 3. Повторный запрос — таблица меток с сохранённым ответом
-**Проблема:** связь моргнула, клиент повторил перевод. Нужен тот же ответ, а не второй перевод. Отказ тоже: иначе повтор после «не хватает денег» пройдёт, когда деньги придут.
-
-**Решение:**
-- Заголовок `Idempotency-Key`, таблица `idempotency_keys` с ключом `(user_id, key)`.
-- Всё в одной транзакции: `INSERT … ON CONFLICT DO NOTHING` → работа → записать ответ → зафиксировать.
-- Одновременный дубль ждёт на вставке конца первой транзакции, потом читает сохранённый ответ. Статус «в процессе» не нужен.
-- `23505` не ловим: после любой ошибки транзакция Postgres сломана (`25P02`).
-- Запоминаем результаты по существу, включая 422. Технические сбои откатываются вместе с меткой.
-- Та же метка с другим телом → 422.
-- Метка действует в пределах пользователя, хранится 24 часа.
-
-**Не выбрали:** метку колонкой в `operations` — запоминается только успех.
-
-### 4. Медленный провайдер — вывод отвечает «принят»
-**Проблема:** провайдер отвечает секундами или молчит. Транзакция, которая его ждёт, держит соединение и блокировку счёта и тормозит переводы.
-
-**Решение:**
-- `POST /payments` — одна транзакция: платёж в `accepted`, заморозка, событие в outbox, метка. Ответ `202`.
-- Провайдера вызывает отправщик платежей, вне транзакции.
-- Итог клиент узнаёт через `GET /payments/{id}`.
-
-### 5. Неизвестный результат — статусы и сверщик
-**Проблема:** отправили 50 €, ответа нет. Вернуть, повторить и списать — всё может быть ошибкой.
-
-**Решение:**
-
-| Статус | Значит | Деньги |
-|---|---|---|
-| `accepted` | записали, не отправили | заморожены |
-| `sent` | провайдер принял | заморожены |
-| `unknown` | ответа нет | заморожены |
-| `succeeded` | отправлено | `frozen` → `outside` |
-| `failed` | точный отказ | `frozen` → счёт |
-| `needs_review` | решает человек | заморожены |
-
-- Смена статуса — условный `UPDATE … WHERE status IN (…)`. Кто первый, тот и поменял, деньги двигаются в той же транзакции ровно один раз.
-- Сверщик спрашивает статус `sent` и `unknown` с растущей паузой. Через сутки без ответа — `needs_review`.
-- Провайдер ответил «не знаю такого», и прошла минута → `accepted`. Отправка повторяется с тем же ключом.
-- Уведомления провайдера: проверка HMAC, затем `webhook_inbox`. Дубль отсекает ключ `(provider_id, provider_event_id)`.
-
-### 6. События наружу — transactional outbox, один отправщик
-**Проблема:** записали платёж и упали до Kafka — событие потеряно. Отправили до записи — событие о несуществующем платеже.
-
-**Решение:**
-- Событие пишется в `outbox` в той же транзакции. Отправщик раз в несколько сотен мс шлёт пачку по `id` и ставит `sent_at`.
-- Доставка «хотя бы один раз», получатель отсекает дубли по `event_id`.
-- Ключ партиции — `account_id`, чтобы события счёта шли по порядку.
-- Отправщик один (`pg_try_advisory_lock`): несколько отправщиков со `SKIP LOCKED` ломают порядок.
-- Отправленные события старше 7 дней удаляются.
-
-**Не выбрали:** Debezium — тяжело для Raspberry Pi.
-
-### 7. База — `pgx` напрямую, SQL руками
-- `pgx/v5` + `pgxpool`, SQL строками в `internal/postgres`.
-- Ошибки — через `errors.As` в `*pgconn.PgError` по коду. Наружу уходят ошибки домена (`ErrInsufficientFunds`), а не коды Postgres.
-- Все транзакции — через одну функцию `inTx`: `lock_timeout`, откат, повтор при `40P01`/`40001`, фиксация.
-- Миграции — goose.
-
-**Не выбрали:**
-- `sqlc` — отложен, переходим, когда запросов станет больше 30;
-- ORM — прячет SQL, на котором держатся решения.
-
-### 8. Вызовы провайдера — воркеры, таймауты, предохранитель
-- База — очередь. N воркеров (по умолчанию 10) берут платежи `accepted` через `FOR UPDATE SKIP LOCKED`, ставят бронь `next_attempt_at = now() + 30s` и фиксируют, потом вызывают провайдера. Порядок здесь неважен.
-- Свой `http.Client`: таймаут 5 с, `MaxConnsPerHost`.
-- Таймаут «отправь» → `unknown`. Таймаут «какой статус» → спросить позже.
-- Повторы только для «какой статус»: до 3 раз, пауза 1–2–4 с с jitter. «Отправь» быстро не повторяется.
-- Свой предохранитель: замкнут → разомкнут на 30 с при доле отказов выше порога → полуоткрыт, один пробный вызов. Запасной вариант — `sony/gobreaker`.
-
-### 9. Транспорт — REST наружу, gRPC внутрь, одно ядро
-REST — `net/http` и `ServeMux` с методами в шаблонах, без фреймворка. gRPC — метод `GetBalance`, контракт в `api/proto`, генерация через `buf`. Обработчики только переводят форматы, логика одна.
-
-| Запрос | Что делает |
-|---|---|
-| `GET /healthz` | процесс жив (базу не трогает) |
-| `GET /readyz` | готов: база отвечает, иначе 503 |
-| `GET /accounts` | счета пользователя из `X-User-ID` |
-| `GET /accounts/{id}` | счёт и баланс |
-| `GET /accounts/{id}/postings` | выписка, новые сверху |
-| `POST /accounts/{id}/deposits` | тестовое пополнение, нужен `Idempotency-Key` |
-| `POST /transfers` | перевод, нужен `Idempotency-Key` |
-| `POST /payments` | вывод на карту, нужен `Idempotency-Key`, ответ 202 |
-| `GET /payments/{id}` | статус платежа |
-| `POST /webhooks/provider` | уведомления провайдера |
-| `GET /events` | лента событий для страницы |
-| `GET /` | демо-страница |
-
-| Ошибка ядра | REST | gRPC |
-|---|---|---|
-| не найдено | 404 | `NotFound` |
-| чужой счёт | 404, чтобы не выдавать, что счёт существует | `NotFound` |
-| не хватает денег | 422 | `FailedPrecondition` |
-| разные валюты | 422 | `FailedPrecondition` |
-| метка от другого запроса | 422 | `InvalidArgument` |
-| неверные данные | 400 | `InvalidArgument` |
-| остальное | 500 | `Internal` |
-
-Пользователь задаётся заголовком `X-User-ID`, сервер ему верит. Это допущение для демо: аутентификации нет.
-
-### 10. Демо-страница
-- Чистый HTML и JS без сборки, вшиты через `embed`, отдаются на `GET /`. Язык страницы — английский.
-- Вверху переключатель «You are: Petya / Masha».
-- Статус платежа страница опрашивает раз в секунду.
-- Экраны:
-  - Accounts — счета, выписка, пополнение;
-  - Transfer — в том числе «два перевода сразу»;
-  - Retry — «та же метка ещё раз»;
-  - Payout — статус меняется на глазах;
-  - Events — лента из Kafka;
-  - Provider — задержка провайдера и «провайдер лежит».
-- Сценарий платежа задают последние цифры карты, их понимает только симулятор:
-
-| Карта | Сценарий |
-|---|---|
-| `…0001` | успех |
-| `…0002` | отказ |
-| `…0003` | нет ответа |
-| `…0004` | уведомление с задержкой |
-
-## Схема данных
-
-Деньги — `bigint` в центах, валюта — `char(3)`.
-
-| Таблица | Поля | Ограничения |
-|---|---|---|
-| `users` | `id uuid`, `first_name`, `last_name`, `created_at` | |
-| `accounts` | `id uuid`, `user_id` (пусто у служебных), `type` (`user`/`system`), `code` (`frozen`/`outside` у служебных), `currency`, `balance` (`NULL` у служебных), `created_at` | `accounts_kind_check`: у счёта человека есть владелец и баланс, у служебного — код и нет баланса; `accounts_balance_non_negative`: `balance >= 0`; `UNIQUE (code, currency)` — один служебный счёт вида на валюту; `accounts_user_currency_unique`: `UNIQUE (user_id, currency)` — у человека один счёт на валюту, этот же индекс ищет счета по `user_id` |
-| `operations` | `id bigserial`, `type` (`deposit`, `transfer`, `payout_hold`, `payout_settle`, `payout_release`), `payment_id` (появится в срезе 3 вместе с `payments`; пусто у переводов), `created_at` | не меняется |
-| `postings` | `id bigserial`, `operation_id`, `account_id`, `amount` (минус — списание), `created_at` | `CHECK (amount <> 0)`, индекс `(account_id, id)` |
-| `idempotency_keys` | `user_id`, `key`, `request_hash bytea`, `response_code int`, `response_body jsonb`, `created_at` | PK `(user_id, key)`, индекс по `created_at` |
-| `payments` (срез 3) | `id uuid` (он же ключ к провайдеру), `account_id`, `provider_id`, `amount`, `currency`, `destination`, `status`, `provider_ref`, `attempts`, `next_attempt_at`, `created_at`, `updated_at` | `CHECK (amount > 0)`, индекс `(status, next_attempt_at)` |
-| `providers` (срез 3) | `id uuid`, `name` | `UNIQUE (name)` |
-| `webhook_inbox` (срез 4) | `provider_id`, `provider_event_id`, `payment_id`, `payload jsonb`, `received_at`, `processed_at` | PK `(provider_id, provider_event_id)` |
-| `outbox` (срез 5) | `id bigserial`, `event_id uuid`, `account_id`, `type`, `payload jsonb`, `created_at`, `sent_at` | `UNIQUE (event_id)`, частичный индекс `(id) WHERE sent_at IS NULL` |
-
-Типы событий в outbox: `deposit.completed`, `transfer.completed`, `payment.accepted`, `payment.succeeded`, `payment.failed`, `payment.needs_review`.
-
-## План
-
-| Срез | Что | Время |
-|---|---|---|
-| 1 | счета, пополнение, перевод, защита от повтора, страница | 3–3,5 ч |
-| 2 | gRPC `GetBalance` | 1 ч |
-| 3 | симулятор провайдера, вывод, статусы | 2–3 ч |
-| 4 | сверщик, уведомления, предохранитель | 2–3 ч |
-| 5 | outbox, Kafka, лента событий | 2 ч |
-| 6 | метрики, CI | 1–2 ч |
-
-Правила работы:
-- шаг занимает 15–30 минут и закрыт, когда прошла его проверка;
-- после шага — коммит;
-- застрял дольше 30 минут — стоп, режем шаг мельче.
-
-### Срез 1
-
-- [x] **1. Каркас.** config, `Connect` и `Migrate`, `/healthz` и `/readyz`, graceful shutdown, Dockerfile, compose, `.gitignore`.
-  Проверка: `docker compose up -d --build --wait`, затем `/readyz` → 200.
-  Коммит: `Service skeleton: config, HTTP server, Postgres, graceful shutdown`.
-- [x] **2. Таблицы и демо-данные.**
-  - `00001_tables.sql`: `users`, `accounts`, `operations`, `postings`, `idempotency_keys` со всеми `CHECK` и индексами.
-  - `00002_seed.sql`: Petya и Masha с EUR-счетами, `frozen` и `outside` в EUR.
-
-  Проверка: `docker compose exec postgres psql -U app -d ledger -c "\dt"` → 5 таблиц; `accounts` → 4 строки.
-  Коммит: `Ledger schema and demo seed`.
-- [x] **3. Чтение.** `GET /accounts`, `/accounts/{id}`, `/accounts/{id}/postings`. Суммы — целые центы.
-  Проверка: `curl.exe -H "X-User-ID: 11111111-1111-1111-1111-111111111111" http://127.0.0.1:8095/accounts` → счёт Пети, `balance: 0`.
-  Коммит: `Read accounts and statement`.
-- [x] **4. Пополнение.**
-  - Функция `inTx`.
-  - `POST /accounts/{id}/deposits` `{"amount": 10000}`: счёт должен принадлежать `X-User-ID`; движения `outside` −, счёт +; кеш под `FOR UPDATE`.
-
-  Проверка: баланс 10000, в выписке строка `deposit`.
-  Коммит: `Deposits through a shared transaction helper`.
-- [x] **5. Перевод.**
-  - `POST /transfers` `{"from_account_id", "to_account_id", "amount"}`.
-  - Отказы: чужой счёт отправителя или нет получателя → 404; тот же счёт или сумма ≤ 0 → 400; разные валюты или не хватает денег → 422.
-  - Блокировки в порядке id.
-
-  Проверка — интеграционный тест: баланс 10000, два перевода по 8000 одновременно → один 201, один 422, остаток 2000.
-  Коммит: `Transfers with ordered row locks`.
-- [x] **6. Защита от повтора.** `Idempotency-Key` обязателен на пополнении и переводе, без него → 400.
-  Проверка — тесты:
-  - повтор → тот же ответ, одна операция;
-  - другая сумма → 422;
-  - два одновременных → одна операция.
-
-  Коммит: `Idempotency keys for deposits and transfers`.
-- [x] **7. Страница.**
-  - `internal/web` (`index.html`, `app.js`), вкладки Accounts и Transfer.
-  - Кнопки Send, Send twice at once, Retry same key.
-  - Журнал ответов.
-
-  Проверка: открыть `http://127.0.0.1:8095/` и нажать всё.
-  Коммит: `Demo page: accounts, deposits, transfers`.
-
-Срез закрыт, когда прошли все 7 проверок и `go test ./...` зелёный.
-
-## Что не сделано
-
-- Нет аутентификации: `X-User-ID` берётся на веру.
-- Правило «сумма движений = 0» проверяет код, а не база (отложенный триггер — потом).
-- Нет сверки с реестром провайдера и интерфейса для `needs_review`.
-- Деплой на Raspberry Pi не решён: неясно, влезет ли Kafka по памяти.
+Each slice ends with a deploy of the demo and a line in this README.

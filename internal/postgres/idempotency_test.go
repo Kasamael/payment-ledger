@@ -10,10 +10,10 @@ import (
 	"sync/atomic"
 	"testing"
 
-	"payment_ledger/internal/ledger"
-
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
+
+	"github.com/Kasamael/payment-ledger/internal/ledger"
 )
 
 func countingDeposit(repo *AccountRepository, calls *atomic.Int32, userID, accountID string, amount int64) func(pgx.Tx) (Response, error) {

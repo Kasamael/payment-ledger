@@ -9,11 +9,11 @@ import (
 	"testing"
 	"time"
 
-	"payment_ledger/internal/ledger"
-
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
+
+	"github.com/Kasamael/payment-ledger/internal/ledger"
 )
 
 const defaultTestDatabaseURL = "postgres://app:app@127.0.0.1:5433/ledger?sslmode=disable"
@@ -27,6 +27,10 @@ func testPool(t *testing.T) *pgxpool.Pool {
 	url := cmp.Or(os.Getenv("TEST_DATABASE_URL"), defaultTestDatabaseURL)
 	pool, err := Connect(ctx, url)
 	if err != nil {
+		// In CI a missing database is a broken pipeline, not a reason to skip.
+		if os.Getenv("CI") != "" {
+			t.Fatalf("postgres is not available in CI: %v", err)
+		}
 		t.Skipf("postgres is not available, skipping: %v", err)
 	}
 	t.Cleanup(pool.Close)

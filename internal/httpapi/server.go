@@ -3,10 +3,11 @@ package httpapi
 import (
 	"context"
 	"net/http"
-	"payment_ledger/internal/web"
 	"time"
 
 	"github.com/jackc/pgx/v5/pgxpool"
+
+	"github.com/Kasamael/payment-ledger/internal/web"
 )
 
 type Server struct {

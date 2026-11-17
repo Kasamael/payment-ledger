@@ -5,10 +5,11 @@ import (
 	"encoding/json"
 	"log/slog"
 	"net/http"
-	"payment_ledger/internal/postgres"
 
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
+
+	"github.com/Kasamael/payment-ledger/internal/postgres"
 )
 
 type AccountHandler struct {

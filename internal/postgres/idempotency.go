@@ -4,9 +4,10 @@ import (
 	"bytes"
 	"context"
 	"fmt"
-	"payment_ledger/internal/ledger"
 
 	"github.com/jackc/pgx/v5"
+
+	"github.com/Kasamael/payment-ledger/internal/ledger"
 )
 
 type Response struct {

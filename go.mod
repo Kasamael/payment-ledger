@@ -1,4 +1,4 @@
-module payment_ledger
+module github.com/Kasamael/payment-ledger
 
 go 1.26.0
 
