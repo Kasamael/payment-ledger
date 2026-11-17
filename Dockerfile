@@ -1,4 +1,6 @@
-FROM mirror.gcr.io/library/golang:1.26-alpine AS build
+# Build on the runner's own platform and cross-compile for the target:
+# much faster than compiling Go under QEMU for linux/arm64.
+FROM --platform=$BUILDPLATFORM mirror.gcr.io/library/golang:1.26-alpine AS build
 
 WORKDIR /src
 
@@ -7,7 +9,9 @@ RUN go mod download
 
 COPY . .
 
-RUN CGO_ENABLED=0 go build -trimpath -ldflags="-s -w" -o /out/ledger ./cmd/ledger
+ARG TARGETOS TARGETARCH
+RUN CGO_ENABLED=0 GOOS=$TARGETOS GOARCH=$TARGETARCH \
+    go build -trimpath -ldflags="-s -w" -o /out/ledger ./cmd/ledger
 
 FROM gcr.io/distroless/static-debian12:nonroot
 
