@@ -281,7 +281,7 @@ REST — `net/http` и `ServeMux` с методами в шаблонах, бе�
   - два одновременных → одна операция.
 
   Коммит: `Idempotency keys for deposits and transfers`.
-- [ ] **7. Страница.**
+- [x] **7. Страница.**
   - `internal/web` (`index.html`, `app.js`), вкладки Accounts и Transfer.
   - Кнопки Send, Send twice at once, Retry same key.
   - Журнал ответов.

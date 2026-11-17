@@ -3,6 +3,7 @@ package httpapi
 import (
 	"context"
 	"net/http"
+	"payment_ledger/internal/web"
 	"time"
 
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -34,5 +35,6 @@ func (s *Server) Routes(pool *pgxpool.Pool) http.Handler {
 	mux.HandleFunc("GET /accounts/{id}/postings", s.as.GetAccountPostings)
 	mux.HandleFunc("POST /accounts/{id}/deposits", s.as.Deposit)
 	mux.HandleFunc("POST /transfers", s.as.Transfer)
+	mux.Handle("GET /", web.Handler())
 	return mux
 }
