@@ -9,15 +9,18 @@ The money is fake.
 **Status:** slice 1 of 6 is done — accounts, deposits, transfers, idempotent API, demo page, integration tests.
 Payouts through an unreliable provider, gRPC and Kafka are designed below and marked *planned*.
 
-Live demo: *coming soon* · Stack: Go, `net/http`, `pgx`, PostgreSQL, goose, Docker
+**Live demo: <https://payments-ledger.bulanev.dev/>** · Stack: Go, `net/http`, `pgx`, PostgreSQL, goose, Docker
 
 ## Try it in 60 seconds
+
+Open the [live demo](https://payments-ledger.bulanev.dev/), or run it locally and open <http://127.0.0.1:8095/>:
 
 ```bash
 docker compose up -d --build --wait
 ```
 
-Open <http://127.0.0.1:8095/>. You are Petya.
+You are Petya. The live demo is shared, so balances may differ from the numbers below: for step 2 pick an amount
+above half of Petya's balance.
 
 1. **Accounts** → *Deposit* 100 €.
 2. **Transfer** → amount 80 € → *Send twice at once*.
